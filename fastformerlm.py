@@ -7,7 +7,7 @@ import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Layer, Dense, Dropout, LayerNormalization
 from tensorflow.keras.optimizers.schedules import PolynomialDecay
-from tensorflow.keras.optimizers import Adam
+from official.nlp.optimization import WarmUp, AdamWeightDecay
 from tensorflow.keras.initializers import TruncatedNormal
 from tensorflow.keras.losses import SparseCategoricalCrossentropy
 import argparse
@@ -26,7 +26,7 @@ parser.add_argument('--drop_rate', default=0.1, type=float, help='rate for dropo
 parser.add_argument('--block', type=int, default=12, help='number of Encoder submodel')
 parser.add_argument('--head', type=int, default=12, help='number of multi_head attention')
 parser.add_argument('--batch_size', type=int, default=4, help='Batch size during training')
-parser.add_argument('--epochs', type=int, default=10, help='Epochs during training')
+parser.add_argument('--epochs', type=int, default=100, help='Epochs during training')
 parser.add_argument('--lr', type=float, default=5.0e-5, help='Initial learing rate')
 parser.add_argument('--hidden_size', type=int, default=768, help='Embedding size for QA words')
 parser.add_argument('--intermediate_size', type=int, default=3072, help='Embedding size for QA words')
@@ -434,7 +434,7 @@ class USR:
 
         model = Model(inputs=[sen], outputs=[logits])
 
-        # tf.keras.utils.plot_model(model, to_file="FastFormerLM.jpg", show_shapes=True, dpi=900)
+        tf.keras.utils.plot_model(model, to_file="FastFormerLM.jpg", show_shapes=True, dpi=200)
 
         if summary:
             model.summary(line_length=200)
@@ -472,13 +472,22 @@ class USR:
         else:
             model.load_weights(params.check + '/fastformerlm.h5')
 
-        learning_rate = PolynomialDecay(initial_learning_rate=params.lr,
-                                        decay_steps=params.epochs * params.per_save,
-                                        end_learning_rate=0.0,
-                                        power=1.0,
-                                        cycle=False)
+        decay_schedule = PolynomialDecay(initial_learning_rate=params.lr,
+                                         decay_steps=params.epochs * params.per_save,
+                                         end_learning_rate=0.0,
+                                         power=1.0,
+                                         cycle=False)
 
-        model.compile(optimizer=Adam(learning_rate))
+        warmup_schedule = WarmUp(initial_learning_rate=params.lr,
+                                 decay_schedule_fn=decay_schedule,
+                                 warmup_steps=2 * params.per_save)
+
+        optimizer = AdamWeightDecay(learning_rate=warmup_schedule,
+                                    weight_decay_rate=0.01,
+                                    epsilon=1.0e-6,
+                                    exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"])
+
+        model.compile(optimizer=optimizer)
 
         model.fit(batch_data,
                   epochs=params.epochs,
