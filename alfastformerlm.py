@@ -1,13 +1,15 @@
 '''
-    tf 2.5 for bert
+    tf 2.5 for FastFormer
     预训练语言模型
+    q=v
+    层参数共享
 '''
 
 import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Layer, Dense, Dropout, LayerNormalization
 from tensorflow.keras.optimizers.schedules import PolynomialDecay
-from tensorflow.keras.optimizers import Adam
+from official.nlp.optimization import WarmUp, AdamWeightDecay
 from tensorflow.keras.initializers import TruncatedNormal
 from tensorflow.keras.losses import SparseCategoricalCrossentropy
 import argparse
@@ -23,14 +25,15 @@ parser.add_argument('--maxword', default=512, type=int, help='The max length of 
 parser.add_argument('--type_vocab_size', default=2, type=int, help='type_vocab_size')
 parser.add_argument('--vocab_size', default=21128, type=int, help='type_vocab_size')
 parser.add_argument('--drop_rate', default=0.1, type=float, help='rate for dropout')
-parser.add_argument('--block', type=int, default=12, help='number of Encoder submodel')
+parser.add_argument('--block', type=int, default=4, help='number of Encoder submodel')
 parser.add_argument('--head', type=int, default=12, help='number of multi_head attention')
 parser.add_argument('--batch_size', type=int, default=4, help='Batch size during training')
-parser.add_argument('--epochs', type=int, default=10, help='Epochs during training')
+parser.add_argument('--epochs', type=int, default=100, help='Epochs during training')
 parser.add_argument('--lr', type=float, default=5.0e-5, help='Initial learing rate')
 parser.add_argument('--hidden_size', type=int, default=768, help='Embedding size for QA words')
 parser.add_argument('--intermediate_size', type=int, default=3072, help='Embedding size for QA words')
-parser.add_argument('--check', type=str, default='model/bertlm', help='The path where modelfiles shall be saved')
+parser.add_argument('--check', type=str, default='model/alfastformerlm',
+                    help='The path where modelfiles shall be saved')
 parser.add_argument('--mode', type=str, default='train0', help='The mode of train or predict as follows: '
                                                                'train0: begin to train or retrain'
                                                                'tran1:continue to train'
@@ -101,32 +104,35 @@ def load_model_weights_from_checkpoint(model,
     ]
     model.get_layer('embeddings').set_weights(weights)
 
-    for i in range(params.block):
-        pre = 'bert/encoder/layer_' + str(i) + '/'
+    i = 0
+    pre = 'bert/encoder/layer_' + str(i) + '/'
 
-        weights = [
-            loader(pre + 'attention/self/query/kernel'),
-            loader(pre + 'attention/self/query/bias'),
-            loader(pre + 'attention/self/key/kernel'),
-            loader(pre + 'attention/self/key/bias'),
-            loader(pre + 'attention/self/value/kernel'),
-            loader(pre + 'attention/self/value/bias'),
-            loader(pre + 'attention/output/dense/kernel'),
-            loader(pre + 'attention/output/dense/bias'),
-            loader(pre + 'attention/output/LayerNorm/gamma'),
-            loader(pre + 'attention/output/LayerNorm/beta'),
-        ]
-        model.get_layer('attention-' + str(i)).set_weights(weights)
+    w1 = model.get_layer('attention-' + str(i)).get_weights()
 
-        weights = [
-            loader(pre + 'intermediate/dense/kernel'),
-            loader(pre + 'intermediate/dense/bias'),
-            loader(pre + 'output/dense/kernel'),
-            loader(pre + 'output/dense/bias'),
-            loader(pre + 'output/LayerNorm/gamma'),
-            loader(pre + 'output/LayerNorm/beta'),
-        ]
-        model.get_layer('feedford-' + str(i)).set_weights(weights)
+    weights = [
+        loader(pre + 'attention/self/query/kernel'),
+        loader(pre + 'attention/self/query/bias'),
+        loader(pre + 'attention/self/key/kernel'),
+        loader(pre + 'attention/self/key/bias'),
+        loader(pre + 'attention/output/dense/kernel'),
+        loader(pre + 'attention/output/dense/bias'),
+        loader(pre + 'attention/output/LayerNorm/gamma'),
+        loader(pre + 'attention/output/LayerNorm/beta'),
+    ]
+    w1[:4] = weights[:4]
+    w1[10:] = weights[4:]
+
+    model.get_layer('attention-' + str(i)).set_weights(w1)
+
+    weights = [
+        loader(pre + 'intermediate/dense/kernel'),
+        loader(pre + 'intermediate/dense/bias'),
+        loader(pre + 'output/dense/kernel'),
+        loader(pre + 'output/dense/bias'),
+        loader(pre + 'output/LayerNorm/gamma'),
+        loader(pre + 'output/LayerNorm/beta'),
+    ]
+    model.get_layer('feedford-' + str(i)).set_weights(weights)
 
     weights = [
         loader('cls/predictions/transform/dense/kernel'),
@@ -152,9 +158,12 @@ class Mask(Layer):
         mask_label = tf.logical_and(mask_label, mask)
 
         noise = tf.where(mask_label, 103 * tf.ones_like(sen), sen)
-        seq_length = tf.shape(sen)[1]
 
-        return tf.tile(tf.expand_dims(mask, axis=1), [params.head, seq_length, 1]), tf.cast(mask_label, tf.float32), noise
+        mask = tf.where(mask,
+                        tf.zeros_like(sen, tf.float32),
+                        (1.0 - tf.pow(2.0, 31.0)) * tf.ones_like(sen, tf.float32))
+
+        return tf.tile(tf.expand_dims(mask, axis=1), [1, params.head, 1]), tf.cast(mask_label, tf.float32), noise
 
 
 class Embeddings(Layer):
@@ -201,37 +210,115 @@ class Attention(Layer):
                              name='key',
                              dtype=tf.float32,
                              kernel_initializer=create_initializer())
-        self.dense_v = Dense(params.hidden_size,
-                             name='value',
+        self.alpha = Dense(params.head,
+                           name='alpha',
+                           dtype=tf.float32,
+                           kernel_initializer=create_initializer())
+        self.beta = Dense(params.head,
+                          name='beta',
+                          dtype=tf.float32,
+                          kernel_initializer=create_initializer())
+
+        self.dense_u = Dense(params.hidden_size,
+                             name='upvalue',
                              dtype=tf.float32,
                              kernel_initializer=create_initializer())
+
         self.dense_o = Dense(params.hidden_size,
                              name='output',
                              dtype=tf.float32,
                              kernel_initializer=create_initializer())
+
         self.dropout1 = Dropout(rate=params.drop_rate)
         self.dropout2 = Dropout(rate=params.drop_rate)
-        self.layernorm = LayerNormalization(name='layernormattn',epsilon=1e-6)
+        self.dropout3 = Dropout(rate=params.drop_rate)
+        self.layernorm = LayerNormalization(name='layernormattn', epsilon=1e-6)
 
         super(Attention, self).build(input_shape)
 
-    def softmax(self, a, mask):
-        """
-        :param a: B*ML1*ML2
-        :param mask: B*ML1*ML2
-        """
-        return tf.nn.softmax(tf.where(mask, a, (1. - tf.pow(2., 31.)) * tf.ones_like(a)), axis=-1)
-
-    def call(self, inputs,**kwargs):
+    def call(self, inputs, **kwargs):
+        # x: B*N*768 mask:B*12*N
         x, mask = inputs
-        q = tf.concat(tf.split(self.dense_q(x), params.head, axis=-1), axis=0)
-        k = tf.concat(tf.split(self.dense_k(x), params.head, axis=-1), axis=0)
-        v = tf.concat(tf.split(self.dense_v(x), params.head, axis=-1), axis=0)
-        qk = tf.matmul(q, tf.transpose(k, [0, 2, 1])) / tf.sqrt(params.hidden_size / params.head)
-        attention_output = self.dense_o(tf.concat(
-            tf.split(tf.matmul(self.dropout1(self.softmax(qk, mask)), v), params.head, axis=0),
-            axis=-1))
-        return self.layernorm(x + self.dropout2(attention_output))
+
+        batch_size = tf.shape(x)[0]
+        seqlen = tf.shape(x)[1]
+
+        # B*N*768
+        q = self.dense_q(x)
+        k = self.dense_k(x)
+
+        # B*N*12
+        alphascore = self.alpha(q) / (params.hidden_size / params.head) ** 0.5
+        # B*12*N
+        alphascore = tf.transpose(alphascore, [0, 2, 1])
+
+        # B*12*N
+        alphascore += mask
+
+        # B*12*N
+        alphaweight = self.dropout1(tf.nn.softmax(alphascore, axis=-1))
+
+        # B*12*1*N
+        alphaweight = tf.expand_dims(alphaweight, axis=2)
+
+        # B*N*12*64
+        qsplit = tf.reshape(q, [batch_size, seqlen, params.head, params.hidden_size // params.head])
+
+        # B*12*N*64
+        qsplit = tf.transpose(qsplit, [0, 2, 1, 3])
+
+        # B*12*1*64-->B*1*12*64
+        q_av = tf.transpose(tf.matmul(alphaweight, qsplit), [0, 2, 1, 3])
+
+        # B*1*768
+        q_av = tf.reshape(q_av, [-1, 1, params.hidden_size])
+
+        # B*N*768
+        q_av = tf.tile(q_av, [1, seqlen, 1])
+
+        #########################################################################
+
+        # B*N*768
+        p = k * q_av
+
+        # B*N*12
+        betascore = self.beta(p) / (params.hidden_size / params.head) ** 0.5
+        # B*12*N
+        betascore = tf.transpose(betascore, [0, 2, 1])
+
+        # B*12*N
+        betascore += mask
+
+        # B*12*N
+        betaweight = self.dropout2(tf.nn.softmax(betascore, axis=-1))
+
+        # B*12*1*N
+        betaweight = tf.expand_dims(betaweight, axis=2)
+
+        # B*N*12*64
+        psplit = tf.reshape(p, [batch_size, seqlen, params.head, params.hidden_size // params.head])
+
+        # B*12*N*64
+        psplit = tf.transpose(psplit, [0, 2, 1, 3])
+
+        # B*12*1*64-->B*1*12*64
+        p_av = tf.transpose(tf.matmul(betaweight, psplit), [0, 2, 1, 3])
+
+        # B*1*768
+        p_av = tf.reshape(p_av, [-1, 1, params.hidden_size])
+
+        # B*N*768
+        p_av = tf.tile(p_av, [1, seqlen, 1])
+
+        # B*N*768
+        u = p_av * q
+
+        # B*N*768
+        r = self.dense_u(u)
+
+        attention_output = self.dense_o(r + q)
+
+        return self.layernorm(x + self.dropout3(attention_output))
 
 
 class FeedFord(Layer):
@@ -320,7 +407,7 @@ class MyLoss(Layer):
 
 class CheckCallback(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
-        self.model.save_weights(params.check + "/bertlm.h5")
+        self.model.save_weights(params.check + "/fastformerlm.h5")
 
 
 class USR:
@@ -331,9 +418,11 @@ class USR:
 
         now, embedmatrix = Embeddings(name='embeddings')(noise)
 
-        for layers in range(params.block):
-            now = Attention(name='attention-' + str(layers))(inputs=(now, mask))
-            now = FeedFord(name='feedford-' + str(layers))(now)
+        attentionlayer = Attention(name='attention-0')
+        feedfordlayer = FeedFord(name='feedford-0')
+        for _ in range(params.block):
+            now = attentionlayer(inputs=(now, mask))
+            now = feedfordlayer(now)
 
         now = Sequence(name="sequence")(now)
 
@@ -343,10 +432,10 @@ class USR:
 
         model = Model(inputs=[sen], outputs=[logits])
 
-        tf.keras.utils.plot_model(model, to_file="BERTLM.jpg", show_shapes=True, dpi=200)
+        tf.keras.utils.plot_model(model, to_file="FastFormerLM.jpg", show_shapes=True, dpi=200)
 
         if summary:
-            model.summary()
+            model.summary(line_length=200)
             for tv in model.variables:
                 print(tv.name, tv.shape)
 
@@ -377,17 +466,26 @@ class USR:
         if params.mode == 'train0':
             load_model_weights_from_checkpoint(model,
                                                'pretrained/chinese_roberta_wwm_ext_L-12_H-768_A-12/bert_model.ckpt')
-            # model.save_weights(params.check + '/bertlm.h5')
+            # model.save_weights(params.check + '/fastformerlm.h5')
         else:
-            model.load_weights(params.check + '/bertlm.h5')
+            model.load_weights(params.check + '/fastformerlm.h5')
 
-        learning_rate = PolynomialDecay(initial_learning_rate=params.lr,
-                                        decay_steps=params.epochs * params.per_save,
-                                        end_learning_rate=0.0,
-                                        power=1.0,
-                                        cycle=False)
+        decay_schedule = PolynomialDecay(initial_learning_rate=params.lr,
+                                         decay_steps=params.epochs * params.per_save,
+                                         end_learning_rate=0.0,
+                                         power=1.0,
+                                         cycle=False)
 
-        model.compile(optimizer=Adam(learning_rate))
+        warmup_schedule = WarmUp(initial_learning_rate=params.lr,
+                                 decay_schedule_fn=decay_schedule,
+                                 warmup_steps=2 * params.per_save)
+
+        optimizer = AdamWeightDecay(learning_rate=warmup_schedule,
+                                    weight_decay_rate=0.01,
+                                    epsilon=1.0e-6,
+                                    exclude_from_weight_decay=["LayerNorm", "layer_norm", "bias"])
+
+        model.compile(optimizer=optimizer)
 
         model.fit(batch_data,
                   epochs=params.epochs,
