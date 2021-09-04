@@ -301,21 +301,22 @@ class Attention(Layer):
         # B*12*N*64
         psplit = tf.transpose(psplit, [0, 2, 1, 3])
 
-        # B*12*1*64-->B*1*12*64
-        p_av = tf.transpose(tf.matmul(betaweight, psplit), [0, 2, 1, 3])
+        # B*12*1*64
+        p_av = tf.matmul(betaweight, psplit)
 
-        # B*1*768
-        p_av = tf.reshape(p_av, [-1, 1, params.hidden_size])
+        # B*12*N*64
+        u = p_av * qsplit
+
+        # B*N*12*64
+        u = tf.transpose(u, [0, 2, 1, 3])
 
         # B*N*768
-        p_av = tf.tile(p_av, [1, seqlen, 1])
-
-        # B*N*768
-        u = p_av * q
+        u = tf.reshape(u, [batch_size, seqlen, params.hidden_size])
 
         # B*N*768
         r = self.dense_u(u)
 
+        # B*N*768
         attention_output = self.dense_o(r + q)
 
         return self.layernorm(x + self.dropout3(attention_output))

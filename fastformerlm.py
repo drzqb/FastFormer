@@ -27,7 +27,8 @@ parser.add_argument('--block', type=int, default=12, help='number of Encoder sub
 parser.add_argument('--head', type=int, default=12, help='number of multi_head attention')
 parser.add_argument('--batch_size', type=int, default=4, help='Batch size during training')
 parser.add_argument('--epochs', type=int, default=100, help='Epochs during training')
-parser.add_argument('--lr', type=float, default=5.0e-5, help='Initial learing rate')
+parser.add_argument('--warmup_epochs', type=int, default=2, help='Epochs during training')
+parser.add_argument('--lr', type=float, default=1.0e-5, help='Initial learing rate')
 parser.add_argument('--hidden_size', type=int, default=768, help='Embedding size for QA words')
 parser.add_argument('--intermediate_size', type=int, default=3072, help='Embedding size for QA words')
 parser.add_argument('--check', type=str, default='model/fastformerlm', help='The path where modelfiles shall be saved')
@@ -305,21 +306,28 @@ class Attention(Layer):
         # B*12*N*64
         psplit = tf.transpose(psplit, [0, 2, 1, 3])
 
-        # B*12*1*64-->B*1*12*64
-        p_av = tf.transpose(tf.matmul(betaweight, psplit), [0, 2, 1, 3])
+        # B*12*1*64
+        p_av = tf.matmul(betaweight, psplit)
 
-        # B*1*768
-        p_av = tf.reshape(p_av, [-1, 1, params.hidden_size])
+        # B*N*12*64
+        vsplit = tf.reshape(v, [batch_size, seqlen, params.head, params.hidden_size // params.head])
+
+        # B*12*N*64
+        vsplit = tf.transpose(vsplit, [0, 2, 1, 3])
+
+        # B*12*N*64
+        u = p_av * vsplit
+
+        # B*N*12*64
+        u = tf.transpose(u, [0, 2, 1, 3])
 
         # B*N*768
-        p_av = tf.tile(p_av, [1, seqlen, 1])
-
-        # B*N*768
-        u = p_av * v
+        u = tf.reshape(u, [batch_size, seqlen, params.hidden_size])
 
         # B*N*768
         r = self.dense_u(u)
 
+        # B*N*768
         attention_output = self.dense_o(r + q)
 
         return self.layernorm(x + self.dropout3(attention_output))
@@ -480,7 +488,7 @@ class USR:
 
         warmup_schedule = WarmUp(initial_learning_rate=params.lr,
                                  decay_schedule_fn=decay_schedule,
-                                 warmup_steps=2 * params.per_save)
+                                 warmup_steps=params.warmup_epochs * params.per_save)
 
         optimizer = AdamWeightDecay(learning_rate=warmup_schedule,
                                     weight_decay_rate=0.01,
