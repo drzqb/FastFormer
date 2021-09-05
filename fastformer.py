@@ -173,6 +173,142 @@ class Embeddings(Layer):
             self.layernorm(sen_embed + token_embed + self.position_embeddings[:seq_length])), self.word_embeddings
 
 
+# class Attention(Layer):
+#     def __init__(self, **kwargs):
+#         super(Attention, self).__init__(**kwargs)
+#
+#     def build(self, input_shape):
+#         self.dense_q = Dense(params.hidden_size,
+#                              name='query',
+#                              dtype=tf.float32,
+#                              kernel_initializer=create_initializer())
+#         self.dense_k = Dense(params.hidden_size,
+#                              name='key',
+#                              dtype=tf.float32,
+#                              kernel_initializer=create_initializer())
+#         self.dense_v = Dense(params.hidden_size,
+#                              name='value',
+#                              dtype=tf.float32,
+#                              kernel_initializer=create_initializer())
+#         self.alpha = Dense(params.head,
+#                            name='alpha',
+#                            dtype=tf.float32,
+#                            kernel_initializer=create_initializer())
+#         self.beta = Dense(params.head,
+#                           name='beta',
+#                           dtype=tf.float32,
+#                           kernel_initializer=create_initializer())
+#
+#         self.dense_u = Dense(params.hidden_size,
+#                              name='upvalue',
+#                              dtype=tf.float32,
+#                              kernel_initializer=create_initializer())
+#
+#         self.dense_o = Dense(params.hidden_size,
+#                              name='output',
+#                              dtype=tf.float32,
+#                              kernel_initializer=create_initializer())
+#
+#         self.dropout1 = Dropout(rate=params.drop_rate)
+#         self.dropout2 = Dropout(rate=params.drop_rate)
+#         self.dropout3 = Dropout(rate=params.drop_rate)
+#         self.layernorm = LayerNormalization(name='layernormattn', epsilon=1e-6)
+#
+#         super(Attention, self).build(input_shape)
+#
+#     def call(self, inputs, **kwargs):
+#         # x: B*N*768 mask:B*12*N
+#         x, mask = inputs
+#
+#         batch_size = tf.shape(x)[0]
+#         seqlen = tf.shape(x)[1]
+#
+#         # B*N*768
+#         q = self.dense_q(x)
+#         k = self.dense_k(x)
+#         v = self.dense_v(x)
+#
+#         # B*N*12
+#         alphascore = self.alpha(q) / (params.hidden_size / params.head) ** 0.5
+#         # B*12*N
+#         alphascore = tf.transpose(alphascore, [0, 2, 1])
+#
+#         # B*12*N
+#         alphascore += mask
+#
+#         # B*12*N
+#         alphaweight = self.dropout1(tf.nn.softmax(alphascore, axis=-1))
+#
+#         # B*12*1*N
+#         alphaweight = tf.expand_dims(alphaweight, axis=2)
+#
+#         # B*N*12*64
+#         qsplit = tf.reshape(q, [batch_size, seqlen, params.head, params.hidden_size // params.head])
+#
+#         # B*12*N*64
+#         qsplit = tf.transpose(qsplit, [0, 2, 1, 3])
+#
+#         # B*12*1*64-->B*1*12*64
+#         q_av = tf.transpose(tf.matmul(alphaweight, qsplit), [0, 2, 1, 3])
+#
+#         # B*1*768
+#         q_av = tf.reshape(q_av, [-1, 1, params.hidden_size])
+#
+#         # B*N*768
+#         q_av = tf.tile(q_av, [1, seqlen, 1])
+#
+#         #########################################################################
+#
+#         # B*N*768
+#         p = k * q_av
+#
+#         # B*N*12
+#         betascore = self.beta(p) / (params.hidden_size / params.head) ** 0.5
+#         # B*12*N
+#         betascore = tf.transpose(betascore, [0, 2, 1])
+#
+#         # B*12*N
+#         betascore += mask
+#
+#         # B*12*N
+#         betaweight = self.dropout2(tf.nn.softmax(betascore, axis=-1))
+#
+#         # B*12*1*N
+#         betaweight = tf.expand_dims(betaweight, axis=2)
+#
+#         # B*N*12*64
+#         psplit = tf.reshape(p, [batch_size, seqlen, params.head, params.hidden_size // params.head])
+#
+#         # B*12*N*64
+#         psplit = tf.transpose(psplit, [0, 2, 1, 3])
+#
+#         # B*12*1*64
+#         p_av = tf.matmul(betaweight, psplit)
+#
+#         # B*N*12*64
+#         vsplit = tf.reshape(v, [batch_size, seqlen, params.head, params.hidden_size // params.head])
+#
+#         # B*12*N*64
+#         vsplit = tf.transpose(vsplit, [0, 2, 1, 3])
+#
+#         # B*12*N*64
+#         u = p_av * vsplit
+#
+#         # B*N*12*64
+#         u = tf.transpose(u, [0, 2, 1, 3])
+#
+#         # B*N*768
+#         u = tf.reshape(u, [batch_size, seqlen, params.hidden_size])
+#
+#         # B*N*768
+#         r = self.dense_u(u)
+#
+#         # B*N*768
+#         attention_output = self.dense_o(r + q)
+#
+#         return self.layernorm(x + self.dropout3(attention_output))
+
+
 class Attention(Layer):
     def __init__(self, **kwargs):
         super(Attention, self).__init__(**kwargs)
@@ -190,16 +326,17 @@ class Attention(Layer):
                              name='value',
                              dtype=tf.float32,
                              kernel_initializer=create_initializer())
-        self.alpha = Dense(params.head,
+
+        self.alpha = Dense(1,
                            name='alpha',
                            dtype=tf.float32,
                            kernel_initializer=create_initializer())
-        self.beta = Dense(params.head,
+        self.beta = Dense(1,
                           name='beta',
                           dtype=tf.float32,
                           kernel_initializer=create_initializer())
 
-        self.dense_u = Dense(params.hidden_size,
+        self.dense_u = Dense(params.hidden_size // params.head,
                              name='upvalue',
                              dtype=tf.float32,
                              kernel_initializer=create_initializer())
@@ -223,15 +360,22 @@ class Attention(Layer):
         batch_size = tf.shape(x)[0]
         seqlen = tf.shape(x)[1]
 
+        head_dim = params.hidden_size // params.head
+
         # B*N*768
         q = self.dense_q(x)
         k = self.dense_k(x)
         v = self.dense_v(x)
 
-        # B*N*12
-        alphascore = self.alpha(q) / (params.hidden_size / params.head) ** 0.5
+        # B*N*768 --> B*N*12*64 --> B*12*N*64
+        qsplit = tf.transpose(tf.reshape(q, [batch_size, seqlen, params.head, head_dim]), [0, 2, 1, 3])
+        ksplit = tf.transpose(tf.reshape(k, [batch_size, seqlen, params.head, head_dim]), [0, 2, 1, 3])
+        vsplit = tf.transpose(tf.reshape(v, [batch_size, seqlen, params.head, head_dim]), [0, 2, 1, 3])
+
+        # B*12*N*1
+        alphascore = self.alpha(qsplit) / head_dim ** 0.5
         # B*12*N
-        alphascore = tf.transpose(alphascore, [0, 2, 1])
+        alphascore = tf.squeeze(alphascore, axis=-1)
 
         # B*12*N
         alphascore += mask
@@ -239,33 +383,18 @@ class Attention(Layer):
         # B*12*N
         alphaweight = self.dropout1(tf.nn.softmax(alphascore, axis=-1))
 
-        # B*12*1*N
-        alphaweight = tf.expand_dims(alphaweight, axis=2)
-
-        # B*N*12*64
-        qsplit = tf.reshape(q, [batch_size, seqlen, params.head, params.hidden_size // params.head])
-
-        # B*12*N*64
-        qsplit = tf.transpose(qsplit, [0, 2, 1, 3])
-
-        # B*12*1*64-->B*1*12*64
-        q_av = tf.transpose(tf.matmul(alphaweight, qsplit), [0, 2, 1, 3])
-
-        # B*1*768
-        q_av = tf.reshape(q_av, [-1, 1, params.hidden_size])
-
-        # B*N*768
-        q_av = tf.tile(q_av, [1, seqlen, 1])
+        # B*12*N B*12*N*64 --> B*12*64
+        q_av = tf.einsum("ijk,ijkl->ijl", alphaweight, qsplit)
 
         #########################################################################
 
-        # B*N*768
-        p = k * q_av
+        # B*12*N*64
+        p = ksplit * q_av[:, :, None, :]
 
-        # B*N*12
-        betascore = self.beta(p) / (params.hidden_size / params.head) ** 0.5
+        # B*12*N*1
+        betascore = self.beta(p) / head_dim ** 0.5
         # B*12*N
-        betascore = tf.transpose(betascore, [0, 2, 1])
+        betascore = tf.squeeze(betascore, axis=-1)
 
         # B*12*N
         betascore += mask
@@ -273,38 +402,23 @@ class Attention(Layer):
         # B*12*N
         betaweight = self.dropout2(tf.nn.softmax(betascore, axis=-1))
 
-        # B*12*1*N
-        betaweight = tf.expand_dims(betaweight, axis=2)
-
-        # B*N*12*64
-        psplit = tf.reshape(p, [batch_size, seqlen, params.head, params.hidden_size // params.head])
+        # B*12*N B*12*N*64 --> B*12*64
+        p_av = tf.einsum("ijk,ijkl->ijl", betaweight, p)
 
         # B*12*N*64
-        psplit = tf.transpose(psplit, [0, 2, 1, 3])
-
-        # B*12*1*64
-        p_av = tf.matmul(betaweight, psplit)
-
-        # B*N*12*64
-        vsplit = tf.reshape(v, [batch_size, seqlen, params.head, params.hidden_size // params.head])
+        u = vsplit * p_av[:, :, None, :]
 
         # B*12*N*64
-        vsplit = tf.transpose(vsplit, [0, 2, 1, 3])
-
-        # B*12*N*64
-        u = p_av * vsplit
-
-        # B*N*12*64
-        u = tf.transpose(u, [0, 2, 1, 3])
-
-        # B*N*768
-        u = tf.reshape(u, [batch_size, seqlen, params.hidden_size])
-
-        # B*N*768
         r = self.dense_u(u)
 
+        # B*N*12*64
+        newr = tf.transpose(r + qsplit, [0, 2, 1, 3])
+
         # B*N*768
-        attention_output = self.dense_o(r + q)
+        newr = tf.reshape(newr, [batch_size, seqlen, params.hidden_size])
+
+        # B*N*768
+        attention_output = self.dense_o(newr)
 
         return self.layernorm(x + self.dropout3(attention_output))
 
@@ -429,11 +543,16 @@ class USR:
     def build_model(self, summary=True):
         sen = Input(shape=[None], name='sen', dtype=tf.int32)
         token_type = Input(shape=[None], name='token_type', dtype=tf.int32)
+
         mask = Mask()(sen)
+
         now, embedmatrix = Embeddings(name='embeddings')(inputs=(sen, token_type))
+
         for layers in range(params.block):
             now = Attention(name='attention-' + str(layers))(inputs=(now, mask))
+
             now = FeedFord(name='feedford-' + str(layers))(now)
+
         seq = Sequence(name="sequence")(now)
 
         logits = Project(name="project")(inputs=(seq, embedmatrix))
@@ -450,7 +569,7 @@ class USR:
         return model
 
     def predict(self):
-        model = self.build_model(summary=False)
+        model = self.build_model()
         # new_model = Model(inputs=model.inputs,
         #                   outputs=model.get_layer('Pooler').output)  # 你创建新的模型
         prediction = tf.argmax(model.predict([sents, token_types]), axis=-1)[0].numpy()
